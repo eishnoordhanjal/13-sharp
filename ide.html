@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>13# Programming Language IDE</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        .editor-panel {
+            flex: 1;
+            background: #1e1e1e;
+            border-radius: 10px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .output-panel {
+            flex: 1;
+            background: #1e1e1e;
+            border-radius: 10px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            background: #2d2d2d;
+            color: #fff;
+            padding: 15px;
+            font-weight: bold;
+            border-bottom: 2px solid #667eea;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-header h2 {
+            font-size: 18px;
+        }
+
+        .panel-header .badge {
+            background: #667eea;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        textarea {
+            flex: 1;
+            background: #252526;
+            color: #d4d4d4;
+            border: none;
+            padding: 20px;
+            font-family: 'Courier New', 'Fira Code', monospace;
+            font-size: 14px;
+            resize: none;
+            outline: none;
+            line-height: 1.6;
+        }
+
+        .output-area {
+            flex: 1;
+            background: #252526;
+            color: #d4d4d4;
+            padding: 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.6;
+        }
+
+        .button-bar {
+            padding: 15px;
+            background: #2d2d2d;
+            display: flex;
+            gap: 10px;
+            border-top: 1px solid #3e3e3e;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            background: #5a67d8;
+            transform: translateY(-2px);
+        }
+
+        button.clear-btn {
+            background: #e53e3e;
+        }
+
+        button.clear-btn:hover {
+            background: #c53030;
+        }
+
+        button.example-btn {
+            background: #48bb78;
+        }
+
+        button.example-btn:hover {
+            background: #38a169;
+        }
+
+        .status {
+            padding: 8px 15px;
+            background: #1e1e1e;
+            color: #68d391;
+            font-size: 12px;
+            border-top: 1px solid #3e3e3e;
+            font-family: monospace;
+        }
+
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1e1e1e;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="editor-panel">
+            <div class="panel-header">
+                <h2>📝 13# Editor</h2>
+                <span class="badge">Punjabi-inspired Language</span>
+            </div>
+            <textarea id="editor" placeholder='Write your 13# code here...'></textarea>
+            <div class="button-bar">
+                <button onclick="runCode()">▶ Run Code</button>
+                <button onclick="clearOutput()" class="clear-btn">🗑 Clear Output</button>
+                <button onclick="loadExample()" class="example-btn">📋 Load Example</button>
+            </div>
+        </div>
+        <div class="output-panel">
+            <div class="panel-header">
+                <h2>📤 Output</h2>
+                <span class="badge">Console</span>
+            </div>
+            <div id="output" class="output-area"></div>
+            <div id="status" class="status">✅ Ready</div>
+        </div>
+    </div>
+
+    <script>
+        // 13# Interpreter
+        let variables = {};
+        
+        function trim(str) {
+            return str.replace(/^\s+|\s+$/g, '');
+        }
+        
+        function evaluateExpression(expr, vars) {
+            expr = expr.trim();
+            
+            // Handle string literals
+            if (expr.startsWith('"') && expr.endsWith('"')) {
+                return { type: 'string', value: expr.slice(1, -1) };
+            }
+            
+            // Handle numbers
+            if (!isNaN(expr) && expr !== '') {
+                return { type: 'number', value: parseFloat(expr) };
+            }
+            
+            // Handle variables
+            if (vars[expr] !== undefined) {
+                return vars[expr];
+            }
+            
+            // Parse expression with operators
+            let operators = ['+', '-', '*', '/', '==', '!=', '<=', '>=', '<', '>'];
+            let foundOp = null;
+            let opIndex = -1;
+            
+            for (let op of operators) {
+                let idx = expr.indexOf(op);
+                if (idx > 0 && idx < expr.length - op.length) {
+                    // Check if it's not inside parentheses
+                    let parenCount = 0;
+                    let valid = true;
+                    for (let i = 0; i < idx; i++) {
+                        if (expr[i] === '(') parenCount++;
+                        if (expr[i] === ')') parenCount--;
+                        if (parenCount < 0) valid = false;
+                    }
+                    if (valid && parenCount === 0) {
+                        foundOp = op;
+                        opIndex = idx;
+                        break;
+                    }
+                }
+            }
+            
+            if (foundOp) {
+                let left = evaluateExpression(expr.substring(0, opIndex).trim(), vars);
+                let right = evaluateExpression(expr.substring(opIndex + foundOp.length).trim(), vars);
+                
+                let leftVal = left.type === 'number' ? left.value : (left.type === 'string' ? left.value : 0);
+                let rightVal = right.type === 'number' ? right.value : (right.type === 'string' ? right.value : 0);
+                
+                switch(foundOp) {
+                    case '+': 
+                        if (left.type === 'string' || right.type === 'string') {
+                            return { type: 'string', value: String(leftVal) + String(rightVal) };
+                        }
+                        return { type: 'number', value: leftVal + rightVal };
+                    case '-': return { type: 'number', value: leftVal - rightVal };
+                    case '*': return { type: 'number', value: leftVal * rightVal };
+                    case '/': return { type: 'number', value: leftVal / rightVal };
+                    case '==': return { type: 'number', value: leftVal == rightVal ? 1 : 0 };
+                    case '!=': return { type: 'number', value: leftVal != rightVal ? 1 : 0 };
+                    case '<=': return { type: 'number', value: leftVal <= rightVal ? 1 : 0 };
+                    case '>=': return { type: 'number', value: leftVal >= rightVal ? 1 : 0 };
+                    case '<': return { type: 'number', value: leftVal < rightVal ? 1 : 0 };
+                    case '>': return { type: 'number', value: leftVal > rightVal ? 1 : 0 };
+                }
+            }
+            
+            // Handle parentheses
+            if (expr.startsWith('(') && expr.endsWith(')')) {
+                return evaluateExpression(expr.slice(1, -1), vars);
+            }
+            
+            return { type: 'number', value: 0 };
+        }
+        
+        function executeStatement(line, vars, lines, index) {
+            line = trim(line);
+            if (line === '') return index + 1;
+            
+            // Print statement
+            if (line.startsWith('likh')) {
+                let expr = line.substring(4).trim();
+                let result = evaluateExpression(expr, vars);
+                if (result.type === 'string') {
+                    output(result.value);
+                } else {
+                    output(String(result.value));
+                }
+                return index + 1;
+            }
+            
+            // Input statement
+            if (line.startsWith('suno')) {
+                let varName = line.substring(4).trim();
+                let input = prompt('Enter value for ' + varName + ':');
+                let num = parseFloat(input);
+                if (!isNaN(num)) {
+                    vars[varName] = { type: 'number', value: num };
+                } else {
+                    vars[varName] = { type: 'string', value: input };
+                }
+                return index + 1;
+            }
+            
+            // Variable declaration
+            if (line.startsWith('ank')) {
+                let rest = line.substring(3).trim();
+                let eqIndex = rest.indexOf('=');
+                if (eqIndex > 0) {
+                    let varName = trim(rest.substring(0, eqIndex));
+                    let expr = trim(rest.substring(eqIndex + 1));
+                    vars[varName] = evaluateExpression(expr, vars);
+                }
+                return index + 1;
+            }
+            
+            // Assignment
+            if (line.match(/^[a-z]+=/i) || line.includes('=')) {
+                let eqIndex = line.indexOf('=');
+                if (eqIndex > 0) {
+                    let varName = trim(line.substring(0, eqIndex));
+                    let expr = trim(line.substring(eqIndex + 1));
+                    vars[varName] = evaluateExpression(expr, vars);
+                }
+                return index + 1;
+            }
+            
+            // If statement
+            if (line.startsWith('je')) {
+                let expr = line.substring(2).trim();
+                let condition = evaluateExpression(expr, vars);
+                
+                // Find matching samapt
+                let depth = 1;
+                let endIndex = index + 1;
+                let elseIndex = -1;
+                
+                for (let i = index + 1; i < lines.length; i++) {
+                    let l = trim(lines[i]);
+                    if (l === 'samapt') {
+                        depth--;
+                        if (depth === 0) {
+                            endIndex = i;
+                            break;
+                        }
+                    } else if (l.startsWith('je')) {
+                        depth++;
+                    } else if (l === 'nhite' && depth === 1) {
+                        elseIndex = i;
+                    }
+                }
+                
+                if (condition.value !== 0) {
+                    // Execute if block
+                    for (let i = index + 1; i < (elseIndex !== -1 ? elseIndex : endIndex); i++) {
+                        i = executeStatement(lines[i], vars, lines, i);
+                        if (i === -1) break;
+                    }
+                } else if (elseIndex !== -1) {
+                    // Execute else block
+                    for (let i = elseIndex + 1; i < endIndex; i++) {
+                        i = executeStatement(lines[i], vars, lines, i);
+                        if (i === -1) break;
+                    }
+                }
+                
+                return endIndex + 1;
+            }
+            
+            // For loop
+            if (line.startsWith('dohrao')) {
+                let rest = line.substring(6).trim();
+                let parts = rest.split(' ');
+                if (parts.length >= 6) {
+                    let varName = parts[0];
+                    let start = parseInt(parts[2]);
+                    let end = parseInt(parts[4]);
+                    
+                    // Find matching samapt
+                    let depth = 1;
+                    let endIndex = index + 1;
+                    for (let i = index + 1; i < lines.length; i++) {
+                        let l = trim(lines[i]);
+                        if (l === 'samapt') {
+                            depth--;
+                            if (depth === 0) {
+                                endIndex = i;
+                                break;
+                            }
+                        } else if (l.startsWith('dohrao')) {
+                            depth++;
+                        }
+                    }
+                    
+                    // Execute loop
+                    for (let i = start; i <= end; i++) {
+                        vars[varName] = { type: 'number', value: i };
+                        for (let j = index + 1; j < endIndex; j++) {
+                            j = executeStatement(lines[j], vars, lines, j);
+                            if (j === -1) break;
+                        }
+                    }
+                    
+                    return endIndex + 1;
+                }
+            }
+            
+            // While loop
+            if (line.startsWith('jad tak')) {
+                let expr = line.substring(7).trim();
+                
+                // Find matching samapt
+                let depth = 1;
+                let endIndex = index + 1;
+                for (let i = index + 1; i < lines.length; i++) {
+                    let l = trim(lines[i]);
+                    if (l === 'samapt') {
+                        depth--;
+                        if (depth === 0) {
+                            endIndex = i;
+                            break;
+                        }
+                    } else if (l.startsWith('jad tak')) {
+                        depth++;
+                    }
+                }
+                
+                // Execute loop
+                while (true) {
+                    let condition = evaluateExpression(expr, vars);
+                    if (condition.value === 0) break;
+                    
+                    for (let j = index + 1; j < endIndex; j++) {
+                        j = executeStatement(lines[j], vars, lines, j);
+                        if (j === -1) break;
+                    }
+                }
+                
+                return endIndex + 1;
+            }
+            
+            return index + 1;
+        }
+        
+        let outputDiv;
+        
+        function output(text) {
+            outputDiv.innerHTML += text + '\n';
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+        
+        function clearOutput() {
+            outputDiv.innerHTML = '';
+            updateStatus('Cleared', '#68d391');
+        }
+        
+        function updateStatus(message, color) {
+            const status = document.getElementById('status');
+            status.textContent = `✅ ${message}`;
+            status.style.color = color || '#68d391';
+            setTimeout(() => {
+                if (status.textContent === `✅ ${message}`) {
+                    status.style.color = '#68d391';
+                }
+            }, 2000);
+        }
+        
+        function runCode() {
+            const code = document.getElementById('editor').value;
+            const lines = code.split('\n');
+            
+            // Reset
+            variables = {};
+            outputDiv = document.getElementById('output');
+            outputDiv.innerHTML = '';
+            
+            updateStatus('Running...', '#fbbf24');
+            
+            try {
+                let i = 0;
+                while (i < lines.length) {
+                    let line = trim(lines[i]);
+                    if (line && !line.startsWith('#') && line !== 'hukam' && line !== 'samapt') {
+                        i = executeStatement(lines[i], variables, lines, i);
+                        if (i === -1) break;
+                    } else {
+                        i++;
+                    }
+                }
+                updateStatus('Execution completed', '#68d391');
+            } catch (error) {
+                output(`Error: ${error.message}`);
+                updateStatus('Error occurred', '#f87171');
+            }
+        }
+        
+        function loadExample() {
+            const example = `#wjkkwjkf
+
+hukam
+    likh "Sat Sri Akal! Welcome to 13#"
+    likh ""
+    
+    // Variables and arithmetic
+    ank x = 10
+    ank y = 20
+    ank sum = x + y
+    likh "Sum of 10 and 20 is:"
+    likh sum
+    
+    likh ""
+    likh "Testing conditions:"
+    je x > 5
+        likh "x is greater than 5"
+    samapt
+    
+    likh ""
+    likh "For loop (1 to 5):"
+    dohrao i ton 1 to 5
+        likh i
+    samapt
+    
+    likh ""
+    likh "While loop demonstration:"
+    ank counter = 1
+    jad tak counter <= 3
+        likh "Count:"
+        likh counter
+        counter = counter + 1
+    samapt
+    
+    likh ""
+    likh "Program completed successfully!"
+samapt`;
+            
+            document.getElementById('editor').value = example;
+            updateStatus('Example loaded', '#48bb78');
+        }
+        
+        // Load example on page load
+        window.onload = () => {
+            loadExample();
+        };
+    </script>
+</body>
+</html>
