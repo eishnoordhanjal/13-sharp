@@ -1,20 +1,3 @@
-/*
- * 13# (13 Sharp) Interpreter - Punjabi-Inspired Programming Language
- * Improved version with full feature support:
- *   - ank (number), cheez (string), halat (boolean), sangat (array)
- *   - likh (print), suno (input)
- *   - je/nhite/samapt (if/else/end)
- *   - dohrao (for loop), jad tak (while loop)
- *   - seva/wapas (functions/return)
- *   - pakka (constants)
- *   - te/ya/na (and/or/not)
- *   - waak (comments)
- *   - #wjkkwjkf + hukam/samapt program structure
- *   - sangat arrays with indexing
- *   - sach/jhooth (true/false)
- *   - String concatenation with +
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1066,8 +1049,8 @@ static void execute_program(void) {
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("╔═══════════════════════════════════════╗\n");
-        printf("║   13# (13 Sharp) Interpreter v2.0    ║\n");
-        printf("║   Punjabi-Inspired Programming        ║\n");
+        printf("║   13# (13 Sharp) Interpreter          ║\n");
+        printf("║   Punjabi-Programming                 ║\n");
         printf("╠═══════════════════════════════════════╣\n");
         printf("║  Usage: 13sharp <filename.13>         ║\n");
         printf("╠═══════════════════════════════════════╣\n");
