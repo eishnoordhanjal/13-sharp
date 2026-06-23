@@ -1,396 +1,389 @@
+/*
+ * 13# (13 Sharp) Interpreter v3.0
+ * Punjabi-Inspired Programming Language
+ *
+ * Usage:
+ *   13sharp              → interactive shell (like python)
+ *   13sharp file.13      → run a file
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
-#include <stdarg.h>
 
 /* ============================================================
-   LIMITS & CONSTANTS
+   LIMITS
    ============================================================ */
-#define MAX_VARS        256
-#define MAX_STR         1024
-#define MAX_LINES       4096
-#define MAX_ARRAY_SIZE  1024
-#define MAX_PARAMS      16
-#define MAX_FUNCTIONS   64
-#define MAX_CALL_DEPTH  64
+#define MAX_VARS       512
+#define MAX_STR        2048
+#define MAX_LINES      8192
+#define MAX_PARAMS     16
+#define MAX_FUNCTIONS  128
+#define MAX_SCOPE      64
 
 /* ============================================================
-   VALUE TYPES
+   VALUE SYSTEM
    ============================================================ */
-typedef enum {
-    VAL_NUMBER,
-    VAL_STRING,
-    VAL_BOOL,
-    VAL_ARRAY,
-    VAL_NIL
-} ValType;
+typedef enum { VAL_NUM, VAL_STR, VAL_BOOL, VAL_ARR, VAL_NIL } VType;
 
-typedef struct Value Value;
-struct Value {
-    ValType type;
-    double  num;
-    char   *str;         /* heap-allocated string */
-    Value  *arr;         /* heap-allocated array elements */
-    int     arr_len;
+typedef struct Val Val;
+struct Val {
+    VType  t;
+    double n;
+    char  *s;
+    Val   *arr;
+    int    len;
 };
 
-/* ============================================================
-   VARIABLES
-   ============================================================ */
-typedef struct {
-    char   name[MAX_STR];
-    Value  val;
-    int    is_const;
-    int    scope;        /* scope depth */
-} Var;
+static Val make_nil (void)           { Val v={VAL_NIL,0,NULL,NULL,0}; return v; }
+static Val make_num (double n)       { Val v={VAL_NUM,n,NULL,NULL,0}; return v; }
+static Val make_bool(int b)          { Val v={VAL_BOOL,b?1.0:0.0,NULL,NULL,0}; return v; }
 
-static Var   vars[MAX_VARS];
-static int   var_count = 0;
-static int   current_scope = 0;
-
-/* ============================================================
-   FUNCTIONS (seva)
-   ============================================================ */
-typedef struct {
-    char  name[MAX_STR];
-    char  params[MAX_PARAMS][MAX_STR];
-    int   param_count;
-    int   start_line;   /* line after 'seva ...' */
-    int   end_line;     /* line of matching 'samapt' */
-} Function;
-
-static Function funcs[MAX_FUNCTIONS];
-static int      func_count = 0;
-
-/* ============================================================
-   SOURCE LINES
-   ============================================================ */
-static char *lines[MAX_LINES];
-static int   line_count = 0;
-
-/* ============================================================
-   RETURN VALUE (used by seva/wapas)
-   ============================================================ */
-static Value return_value;
-static int   did_return   = 0;
-static int   did_break    = 0;
-static int   did_continue = 0;
-
-/* ============================================================
-   UTILITY: duplicate string
-   ============================================================ */
-static char *dup_str(const char *s) {
-    if (!s) return NULL;
-    char *d = malloc(strlen(s) + 1);
-    strcpy(d, s);
-    return d;
+static Val make_str(const char *s) {
+    Val v={VAL_STR,0,NULL,NULL,0};
+    if(s){ v.s=malloc(strlen(s)+1); strcpy(v.s,s); }
+    return v;
 }
 
-/* ============================================================
-   VALUE HELPERS
-   ============================================================ */
-static Value make_nil(void) {
-    Value v; memset(&v, 0, sizeof(v)); v.type = VAL_NIL; return v;
-}
-static Value make_num(double n) {
-    Value v; memset(&v, 0, sizeof(v)); v.type = VAL_NUMBER; v.num = n; return v;
-}
-static Value make_bool(int b) {
-    Value v; memset(&v, 0, sizeof(v)); v.type = VAL_BOOL; v.num = b ? 1.0 : 0.0; return v;
-}
-static Value make_str(const char *s) {
-    Value v; memset(&v, 0, sizeof(v)); v.type = VAL_STRING; v.str = dup_str(s); return v;
-}
-static int val_truthy(Value *v) {
-    if (v->type == VAL_NIL)    return 0;
-    if (v->type == VAL_BOOL)   return v->num != 0.0;
-    if (v->type == VAL_NUMBER) return v->num != 0.0;
-    if (v->type == VAL_STRING) return v->str && strlen(v->str) > 0;
-    if (v->type == VAL_ARRAY)  return v->arr_len > 0;
-    return 0;
-}
-static double val_to_num(Value *v) {
-    if (v->type == VAL_NUMBER || v->type == VAL_BOOL) return v->num;
-    if (v->type == VAL_STRING) return atof(v->str ? v->str : "0");
-    return 0.0;
-}
-
-static void free_value(Value *v) {
-    if (v->type == VAL_STRING && v->str) { free(v->str); v->str = NULL; }
-    if (v->type == VAL_ARRAY  && v->arr) {
-        for (int i = 0; i < v->arr_len; i++) free_value(&v->arr[i]);
-        free(v->arr); v->arr = NULL;
+static void free_val(Val *v) {
+    if(!v) return;
+    if((v->t==VAL_STR||v->t==VAL_ARR) && v->s){ free(v->s); v->s=NULL; }
+    if(v->t==VAL_ARR && v->arr){
+        for(int i=0;i<v->len;i++) free_val(&v->arr[i]);
+        free(v->arr); v->arr=NULL;
     }
+    v->t=VAL_NIL;
 }
 
-static Value copy_value(Value *v) {
-    Value c = *v;
-    if (v->type == VAL_STRING) c.str = dup_str(v->str);
-    if (v->type == VAL_ARRAY) {
-        c.arr = malloc(sizeof(Value) * v->arr_len);
-        for (int i = 0; i < v->arr_len; i++) c.arr[i] = copy_value(&v->arr[i]);
+static Val copy_val(const Val *v) {
+    Val c=*v;
+    if(v->t==VAL_STR){ c.s=v->s?strdup(v->s):NULL; }
+    if(v->t==VAL_ARR && v->arr){
+        c.arr=malloc(sizeof(Val)*v->len);
+        for(int i=0;i<v->len;i++) c.arr[i]=copy_val(&v->arr[i]);
+        c.s=NULL;
     }
     return c;
 }
 
-static void print_value(Value *v) {
-    if (v->type == VAL_NIL)    { printf("nil"); return; }
-    if (v->type == VAL_BOOL)   { printf("%s", v->num ? "sach" : "jhooth"); return; }
-    if (v->type == VAL_NUMBER) {
-        if (v->num == (long long)v->num) printf("%lld", (long long)v->num);
-        else printf("%g", v->num);
+static int val_truthy(const Val *v){
+    if(v->t==VAL_NIL)  return 0;
+    if(v->t==VAL_BOOL) return v->n!=0.0;
+    if(v->t==VAL_NUM)  return v->n!=0.0;
+    if(v->t==VAL_STR)  return v->s && v->s[0];
+    if(v->t==VAL_ARR)  return v->len>0;
+    return 0;
+}
+static double val_num(const Val *v){
+    if(v->t==VAL_NUM||v->t==VAL_BOOL) return v->n;
+    if(v->t==VAL_STR) return v->s?atof(v->s):0.0;
+    return 0.0;
+}
+static void print_val(const Val *v){
+    if(v->t==VAL_NIL)  { printf("khaali"); return; }
+    if(v->t==VAL_BOOL) { printf("%s",v->n?"sach":"jhooth"); return; }
+    if(v->t==VAL_NUM){
+        if(v->n==(long long)v->n) printf("%lld",(long long)v->n);
+        else printf("%g",v->n);
         return;
     }
-    if (v->type == VAL_STRING) { printf("%s", v->str ? v->str : ""); return; }
-    if (v->type == VAL_ARRAY) {
+    if(v->t==VAL_STR)  { printf("%s",v->s?v->s:""); return; }
+    if(v->t==VAL_ARR){
         printf("[");
-        for (int i = 0; i < v->arr_len; i++) {
-            if (i) printf(", ");
-            print_value(&v->arr[i]);
-        }
+        for(int i=0;i<v->len;i++){ if(i)printf(", "); print_val(&v->arr[i]); }
         printf("]");
     }
 }
-
-/* ============================================================
-   STRING TRIM
-   ============================================================ */
-static char *trim(char *s) {
-    while (*s && isspace((unsigned char)*s)) s++;
-    if (!*s) return s;
-    char *e = s + strlen(s) - 1;
-    while (e > s && isspace((unsigned char)*e)) e--;
-    *(e+1) = '\0';
-    return s;
+static char *val_to_str(const Val *v, char *buf, int blen){
+    if(v->t==VAL_NIL)  { snprintf(buf,blen,"khaali"); }
+    else if(v->t==VAL_BOOL){ snprintf(buf,blen,"%s",v->n?"sach":"jhooth"); }
+    else if(v->t==VAL_NUM){
+        if(v->n==(long long)v->n) snprintf(buf,blen,"%lld",(long long)v->n);
+        else snprintf(buf,blen,"%g",v->n);
+    }
+    else if(v->t==VAL_STR){ snprintf(buf,blen,"%s",v->s?v->s:""); }
+    else snprintf(buf,blen,"[array]");
+    return buf;
 }
 
 /* ============================================================
-   VARIABLE MANAGEMENT
+   VARIABLE STORE  (scoped)
    ============================================================ */
-static Var *find_var(const char *name) {
-    /* Search from most-recent scope outward */
-    for (int i = var_count - 1; i >= 0; i--)
-        if (strcmp(vars[i].name, name) == 0) return &vars[i];
+typedef struct {
+    char name[MAX_STR];
+    Val  val;
+    int  is_const;
+    int  scope;
+} Var;
+
+static Var  vars[MAX_VARS];
+static int  var_count   = 0;
+static int  cur_scope   = 0;
+
+static Var *find_var(const char *n){
+    for(int i=var_count-1;i>=0;i--)
+        if(strcmp(vars[i].name,n)==0) return &vars[i];
     return NULL;
 }
-
-static void set_var(const char *name, Value val, int is_const) {
-    Var *v = find_var(name);
-    if (v) {
-        if (v->is_const) {
-            fprintf(stderr, "Error: Cannot modify constant '%s'\n", name);
-            return;
-        }
-        free_value(&v->val);
-        v->val = copy_value(&val);
+static void set_var(const char *n, Val v, int is_const){
+    Var *existing=find_var(n);
+    if(existing){
+        if(existing->is_const){ fprintf(stderr,"Error: '%s' pakka hai, badal nahi sakde\n",n); free_val(&v); return; }
+        free_val(&existing->val);
+        existing->val=copy_val(&v);
+        free_val(&v);
         return;
     }
-    if (var_count >= MAX_VARS) { fprintf(stderr, "Error: Too many variables\n"); return; }
-    strncpy(vars[var_count].name, name, MAX_STR-1);
-    vars[var_count].val      = copy_value(&val);
+    if(var_count>=MAX_VARS){ fprintf(stderr,"Error: bahut saare variables\n"); free_val(&v); return; }
+    strncpy(vars[var_count].name,n,MAX_STR-1);
+    vars[var_count].val      = copy_val(&v);
     vars[var_count].is_const = is_const;
-    vars[var_count].scope    = current_scope;
+    vars[var_count].scope    = cur_scope;
     var_count++;
+    free_val(&v);
 }
-
-static void push_scope(void) { current_scope++; }
-static void pop_scope(void)  {
-    /* Remove all vars from current scope */
-    while (var_count > 0 && vars[var_count-1].scope == current_scope) {
-        free_value(&vars[var_count-1].val);
+static void push_scope(){ cur_scope++; }
+static void pop_scope(){
+    while(var_count>0 && vars[var_count-1].scope==cur_scope){
+        free_val(&vars[var_count-1].val);
         var_count--;
     }
-    current_scope--;
+    if(cur_scope>0) cur_scope--;
 }
 
 /* ============================================================
-   FORWARD DECLARATIONS
+   SOURCE LINES
    ============================================================ */
-static Value evaluate(char *expr);
-static void  execute_statement(int line_num);
-static void  execute_block(int start, int end);
+static char *src[MAX_LINES];
+static int   src_count=0;
+
+static char *my_trim(char *s){
+    while(*s&&isspace((unsigned char)*s)) s++;
+    if(!*s) return s;
+    char *e=s+strlen(s)-1;
+    while(e>s&&isspace((unsigned char)*e)) e--;
+    *(e+1)='\0';
+    return s;
+}
+static char *trimdup(const char *s){
+    char *d=strdup(s);
+    char *t=my_trim(d);
+    if(t!=d){ memmove(d,t,strlen(t)+1); }
+    return d;
+}
 
 /* ============================================================
-   FIND MATCHING samapt
-   (depth-aware, handles nested je/dohrao/jad tak/seva)
+   FUNCTION REGISTRY
    ============================================================ */
-static int find_matching_samapt(int start) {
-    int depth = 1;
-    for (int i = start + 1; i < line_count; i++) {
-        char buf[MAX_STR]; strncpy(buf, lines[i], MAX_STR-1); buf[MAX_STR-1]='\0';
-        char *l = trim(buf);
+typedef struct {
+    char name[MAX_STR];
+    char params[MAX_PARAMS][MAX_STR];
+    int  param_count;
+    int  body_start; /* line after seva ... */
+    int  body_end;   /* line of matching samapt */
+} Func;
 
-        if (strcmp(l, "samapt") == 0) {
-            depth--;
-            if (depth == 0) return i;
-        } else if ((strncmp(l,"je",2)==0 && (l[2]==' '||l[2]=='\0'))
-                || (strncmp(l,"dohrao",6)==0)
-                || (strncmp(l,"jad tak",7)==0)
-                || (strncmp(l,"seva",4)==0)
-                || (strncmp(l,"hukam",5)==0)) {
+static Func funcs[MAX_FUNCTIONS];
+static int  func_count=0;
+
+/* ============================================================
+   CONTROL FLOW FLAGS
+   ============================================================ */
+static Val  ret_val;
+static int  did_ret   =0;
+static int  did_break =0;
+static int  did_cont  =0;
+
+/* ============================================================
+   FORWARD DECLS
+   ============================================================ */
+static Val  eval(const char *expr);
+static void exec_stmt(int ln);
+static void exec_block(int start, int end);
+
+/* ============================================================
+   FIND MATCHING samapt  (depth-aware)
+   ============================================================ */
+static int find_samapt(int from){
+    int depth=1;
+    for(int i=from+1;i<src_count;i++){
+        char *l=trimdup(src[i]);
+        if(strcmp(l,"samapt")==0){ depth--; if(!depth){free(l);return i;} }
+        else if( (strncmp(l,"je ",3)==0||strcmp(l,"je")==0)
+               ||(strncmp(l,"dohrao ",7)==0)
+               ||(strncmp(l,"jad tak ",8)==0||strncmp(l,"jad tak\n",8)==0)
+               ||(strncmp(l,"seva ",5)==0)
+               || strcmp(l,"hukam")==0 )
             depth++;
-        }
+        free(l);
     }
-    return line_count - 1;
+    return src_count-1;
 }
 
-/* find else (nhite) between start and end_line */
-static int find_nhite(int start, int end_line) {
-    int depth = 0;
-    for (int i = start + 1; i < end_line; i++) {
-        char buf[MAX_STR]; strncpy(buf, lines[i], MAX_STR-1);
-        char *l = trim(buf);
-        if ((strncmp(l,"je",2)==0 && (l[2]==' '||l[2]=='\0'))
-          || strncmp(l,"dohrao",6)==0
-          || strncmp(l,"jad tak",7)==0
-          || strncmp(l,"seva",4)==0
-          || strncmp(l,"hukam",5)==0) depth++;
-        else if (strcmp(l,"samapt")==0) depth--;
-        else if (depth==0 && strncmp(l,"nhite",5)==0 && (l[5]=='\0'||l[5]==' ')) return i;
+static int find_nhite(int from, int end){
+    int depth=0;
+    for(int i=from+1;i<end;i++){
+        char *l=trimdup(src[i]);
+        if((strncmp(l,"je ",3)==0||strcmp(l,"je")==0)
+          ||strncmp(l,"dohrao ",7)==0
+          ||(strncmp(l,"jad tak ",8)==0)
+          ||strncmp(l,"seva ",5)==0
+          ||strcmp(l,"hukam")==0) depth++;
+        else if(strcmp(l,"samapt")==0) depth--;
+        else if(depth==0&&strncmp(l,"nhite",5)==0&&(l[5]=='\0'||l[5]==' '||l[5]=='\n'))
+            { free(l); return i; }
+        free(l);
     }
     return -1;
 }
 
 /* ============================================================
-   EXPRESSION EVALUATOR
-   Full precedence: or -> and -> not -> compare -> add/sub -> mul/div -> unary -> atom
+   REGISTER FUNCTIONS  (scan src for seva)
    ============================================================ */
-
-/* Skip whitespace */
-static const char *skip_ws(const char *p) {
-    while (*p && isspace((unsigned char)*p)) p++;
-    return p;
-}
-
-/* Forward declarations for recursive descent */
-static Value parse_expr(const char **p);
-static Value parse_or(const char **p);
-static Value parse_and(const char **p);
-
-static Value parse_compare(const char **p);
-static Value parse_add(const char **p);
-static Value parse_mul(const char **p);
-static Value parse_unary(const char **p);
-static Value parse_atom(const char **p);
-static Value call_function(const char *name, const char **p);
-
-/* ---- ARRAY LITERAL: [v1, v2, ...] ---- */
-static Value parse_array_literal(const char **p) {
-    (*p)++; /* skip '[' */
-    Value arr; memset(&arr,0,sizeof(arr)); arr.type=VAL_ARRAY;
-    int cap = 8;
-    arr.arr = malloc(sizeof(Value)*cap);
-    arr.arr_len = 0;
-    *p = skip_ws(*p);
-    if (**p == ']') { (*p)++; return arr; }
-    while (**p && **p != ']') {
-        if (arr.arr_len >= cap) { cap*=2; arr.arr=realloc(arr.arr,sizeof(Value)*cap); }
-        arr.arr[arr.arr_len++] = parse_expr(p);
-        *p = skip_ws(*p);
-        if (**p == ',') { (*p)++; *p=skip_ws(*p); }
+static void register_functions(){
+    func_count=0;
+    for(int i=0;i<src_count;i++){
+        char *l=trimdup(src[i]);
+        if(strncmp(l,"seva ",5)!=0){ free(l); continue; }
+        if(func_count>=MAX_FUNCTIONS){ free(l); break; }
+        char *rest=l+5;
+        char *paren=strchr(rest,'(');
+        if(!paren){ free(l); continue; }
+        /* name */
+        char fname[MAX_STR]={0}; int fn=0;
+        char *p=rest;
+        while(p<paren&&!isspace((unsigned char)*p)&&fn<MAX_STR-1) fname[fn++]=*p++;
+        strncpy(funcs[func_count].name,fname,MAX_STR-1);
+        /* params */
+        funcs[func_count].param_count=0;
+        p=paren+1;
+        while(*p&&*p!=')'){
+            while(*p==' '||*p==',') p++;
+            if(*p==')') break;
+            char pn[MAX_STR]={0}; int pk=0;
+            while(*p&&*p!=','&&*p!=')'&&!isspace((unsigned char)*p)&&pk<MAX_STR-1) pn[pk++]=*p++;
+            if(pk&&funcs[func_count].param_count<MAX_PARAMS)
+                strncpy(funcs[func_count].params[funcs[func_count].param_count++],pn,MAX_STR-1);
+        }
+        funcs[func_count].body_start = i+1;
+        funcs[func_count].body_end   = find_samapt(i);
+        func_count++;
+        free(l);
     }
-    if (**p == ']') (*p)++;
-    return arr;
 }
+
+/* ============================================================
+   EXPRESSION PARSER  (recursive descent)
+   ============================================================ */
+static const char *skip_ws(const char *p){ while(*p&&isspace((unsigned char)*p))p++; return p; }
+
+static Val parse_expr (const char **p);
+static Val parse_or   (const char **p);
+static Val parse_and  (const char **p);
+static Val parse_cmp  (const char **p);
+static Val parse_add  (const char **p);
+static Val parse_mul  (const char **p);
+static Val parse_unary(const char **p);
+static Val parse_atom (const char **p);
+static Val call_func  (const char *name, const char **p);
 
 /* ---- ATOM ---- */
-static Value parse_atom(const char **p) {
-    *p = skip_ws(*p);
+static Val parse_atom(const char **p){
+    *p=skip_ws(*p);
 
-    /* Parentheses */
-    if (**p == '(') {
+    /* parentheses */
+    if(**p=='('){
         (*p)++;
-        Value v = parse_expr(p);
-        *p = skip_ws(*p);
-        if (**p == ')') (*p)++;
+        Val v=parse_expr(p);
+        *p=skip_ws(*p);
+        if(**p==')') (*p)++;
         return v;
     }
 
-    /* Array literal */
-    if (**p == '[') return parse_array_literal(p);
+    /* array literal */
+    if(**p=='['){
+        (*p)++;
+        Val a={VAL_ARR,0,NULL,NULL,0};
+        int cap=8; a.arr=malloc(sizeof(Val)*cap);
+        *p=skip_ws(*p);
+        if(**p==']'){(*p)++;return a;}
+        while(**p&&**p!=']'){
+            if(a.len>=cap){cap*=2;a.arr=realloc(a.arr,sizeof(Val)*cap);}
+            a.arr[a.len++]=parse_expr(p);
+            *p=skip_ws(*p);
+            if(**p==','){(*p)++;*p=skip_ws(*p);}
+        }
+        if(**p==']') (*p)++;
+        return a;
+    }
 
-    /* String literal */
-    if (**p == '"' || **p == '\'') {
-        char delim = **p; (*p)++;
-        char buf[MAX_STR]; int j=0;
-        while (**p && **p != delim) {
-            if (**p=='\\' && *(*p+1)) {
+    /* string literal (double or single quote) */
+    if(**p=='"'||**p=='\''){
+        char delim=**p; (*p)++;
+        char buf[MAX_STR*2]; int j=0;
+        while(**p&&**p!=delim){
+            if(**p=='\\'&&*(*p+1)){
                 (*p)++;
-                switch(**p) {
+                switch(**p){
                     case 'n': buf[j++]='\n'; break;
                     case 't': buf[j++]='\t'; break;
-                    default:  buf[j++]=**p; break;
+                    case 'r': buf[j++]='\r'; break;
+                    default:  buf[j++]=**p;  break;
                 }
-            } else buf[j++] = **p;
+            } else {
+                if(j<MAX_STR*2-1) buf[j++]=**p;
+            }
             (*p)++;
         }
-        if (**p) (*p)++;
+        if(**p) (*p)++;
         buf[j]='\0';
         return make_str(buf);
     }
 
-    /* Number */
-    if (isdigit((unsigned char)**p) || (**p=='-' && isdigit((unsigned char)*(*p+1)))) {
+    /* number */
+    if(isdigit((unsigned char)**p)||(**p=='.'&&isdigit((unsigned char)*(*p+1)))){
         char *end;
-        double n = strtod(*p, &end);
-        *p = end;
+        double n=strtod(*p,&end);
+        *p=end;
         return make_num(n);
     }
 
-    /* Identifier, keyword, function call */
-    if (isalpha((unsigned char)**p) || **p=='_') {
+    /* identifier / keyword */
+    if(isalpha((unsigned char)**p)||**p=='_'){
         char name[MAX_STR]; int j=0;
-        while (**p && (isalnum((unsigned char)**p)||**p=='_'||**p==' ')) {
-            /* Handle multi-word keywords: "jad tak", "sach", "jhooth", "na", "te", "ya" */
-            /* Stop collecting if we hit an operator char */
-            if (**p==' ') {
-                /* peek ahead for multi-word */
-                const char *peek = *p+1;
-                while (*peek==' ') peek++;
-                /* check known second words */
-                if (strncmp(peek,"tak",3)==0 && !isalnum(peek[3])) {
-                    /* "jad tak" - but we shouldn't be here; handled elsewhere */
-                    break;
-                }
-                break; /* normal word boundary */
-            }
-            name[j++] = **p; (*p)++;
-        }
+        while(**p&&(isalnum((unsigned char)**p)||**p=='_')&&j<MAX_STR-1)
+            name[j++]=*(*p)++;
         name[j]='\0';
+        *p=skip_ws(*p);
 
-        /* boolean literals */
-        if (strcmp(name,"sach")==0)   return make_bool(1);
-        if (strcmp(name,"jhooth")==0) return make_bool(0);
+        /* boolean / nil literals */
+        if(strcmp(name,"sach"  )==0) return make_bool(1);
+        if(strcmp(name,"jhooth")==0) return make_bool(0);
+        if(strcmp(name,"khaali")==0) return make_nil();
 
-        *p = skip_ws(*p);
+        /* built-in functions that look like identifiers: lambayi, gol, etc. */
+        if(**p=='(') return call_func(name,p);
 
-        /* function call */
-        if (**p == '(') return call_function(name, p);
+        /* variable with optional array index */
+        Var *var=find_var(name);
+        Val base = var ? copy_val(&var->val) : make_nil();
 
-        /* array indexing */
-        Value base;
-        Var *v = find_var(name);
-        base = v ? copy_value(&v->val) : make_nil();
-
-        while (**p == '[') {
+        while(**p=='['){
             (*p)++;
-            Value idx = parse_expr(p);
-            *p = skip_ws(*p);
-            if (**p==']') (*p)++;
-            if (base.type==VAL_ARRAY) {
-                int i = (int)val_to_num(&idx);
-                if (i>=0 && i<base.arr_len) {
-                    Value elem = copy_value(&base.arr[i]);
-                    free_value(&base);
-                    base = elem;
-                } else {
-                    free_value(&base);
-                    base = make_nil();
-                }
+            Val idx=parse_expr(p);
+            *p=skip_ws(*p);
+            if(**p==']') (*p)++;
+            if(base.t==VAL_ARR){
+                int i=(int)val_num(&idx);
+                Val elem=(i>=0&&i<base.len)?copy_val(&base.arr[i]):make_nil();
+                free_val(&base); free_val(&idx);
+                base=elem;
+            } else {
+                free_val(&base); free_val(&idx);
+                base=make_nil();
             }
-            free_value(&idx);
         }
         return base;
     }
@@ -399,708 +392,772 @@ static Value parse_atom(const char **p) {
 }
 
 /* ---- FUNCTION CALL ---- */
-static Value call_function(const char *name, const char **p) {
+static Val call_func(const char *name, const char **p){
     (*p)++; /* skip '(' */
-    /* Parse args */
-    Value args[MAX_PARAMS]; int argc=0;
-    *p = skip_ws(*p);
-    while (**p && **p!=')') {
-        if (argc < MAX_PARAMS) args[argc++] = parse_expr(p);
-        else { Value dummy=parse_expr(p); free_value(&dummy); }
-        *p = skip_ws(*p);
-        if (**p==',') { (*p)++; *p=skip_ws(*p); }
+    Val args[MAX_PARAMS]; int argc=0;
+    *p=skip_ws(*p);
+    while(**p&&**p!=')'){
+        if(argc<MAX_PARAMS) args[argc++]=parse_expr(p);
+        else { Val d=parse_expr(p); free_val(&d); }
+        *p=skip_ws(*p);
+        if(**p==','){(*p)++;*p=skip_ws(*p);}
     }
-    if (**p==')') (*p)++;
+    if(**p==')') (*p)++;
 
-    /* Built-in functions */
-    if (strcmp(name,"lambayi")==0 || strcmp(name,"len")==0) {
-        /* len(array or string) */
-        if (argc>0) {
-            if (args[0].type==VAL_ARRAY) { int n=args[0].arr_len; for(int i=0;i<argc;i++)free_value(&args[i]); return make_num(n); }
-            if (args[0].type==VAL_STRING) { int n=strlen(args[0].str?args[0].str:""); for(int i=0;i<argc;i++)free_value(&args[i]); return make_num(n); }
+    /* ---- BUILT-INS ---- */
+    #define A0 (argc>0?&args[0]:&(Val){VAL_NIL})
+    #define A1 (argc>1?&args[1]:&(Val){VAL_NIL})
+
+    if(!strcmp(name,"lambayi")||!strcmp(name,"len")){
+        int n=0;
+        if(argc>0){
+            if(args[0].t==VAL_ARR) n=args[0].len;
+            else if(args[0].t==VAL_STR) n=args[0].s?(int)strlen(args[0].s):0;
         }
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(0);
-    }
-    if (strcmp(name,"gol")==0 || strcmp(name,"round")==0) {
-        double n = argc>0 ? val_to_num(&args[0]) : 0;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(round(n));
-    }
-    if (strcmp(name,"ghat")==0 || strcmp(name,"floor")==0) {
-        double n = argc>0 ? val_to_num(&args[0]) : 0;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(floor(n));
-    }
-    if (strcmp(name,"vadh")==0 || strcmp(name,"ceil")==0) {
-        double n = argc>0 ? val_to_num(&args[0]) : 0;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(ceil(n));
-    }
-    if (strcmp(name,"jad")==0 || strcmp(name,"abs")==0) {
-        double n = argc>0 ? val_to_num(&args[0]) : 0;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(fabs(n));
-    }
-    if (strcmp(name,"varg")==0 || strcmp(name,"sqrt")==0) {
-        double n = argc>0 ? val_to_num(&args[0]) : 0;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(sqrt(n));
-    }
-    if (strcmp(name,"ank")==0 || strcmp(name,"toNumber")==0) {
-        double n = argc>0 ? val_to_num(&args[0]) : 0;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
+        for(int i=0;i<argc;i++) free_val(&args[i]);
         return make_num(n);
     }
-    if (strcmp(name,"cheez")==0 || strcmp(name,"toString")==0) {
+    if(!strcmp(name,"gol")||!strcmp(name,"round")){
+        double n=argc>0?val_num(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(round(n));
+    }
+    if(!strcmp(name,"ghat")||!strcmp(name,"floor")){
+        double n=argc>0?val_num(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(floor(n));
+    }
+    if(!strcmp(name,"vadh")||!strcmp(name,"ceil")){
+        double n=argc>0?val_num(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(ceil(n));
+    }
+    if(!strcmp(name,"mutlaq")||!strcmp(name,"abs")){
+        double n=argc>0?val_num(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(fabs(n));
+    }
+    if(!strcmp(name,"varg")||!strcmp(name,"sqrt")){
+        double n=argc>0?val_num(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(sqrt(n));
+    }
+    if(!strcmp(name,"taaqat")||!strcmp(name,"pow")){
+        double a=argc>0?val_num(&args[0]):0, b=argc>1?val_num(&args[1]):1;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(pow(a,b));
+    }
+    if(!strcmp(name,"bakiya")||!strcmp(name,"mod")){
+        double a=argc>0?val_num(&args[0]):0, b=argc>1?val_num(&args[1]):1;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(b!=0?fmod(a,b):0);
+    }
+    if(!strcmp(name,"ank")||!strcmp(name,"toNum")){
+        double n=argc>0?val_num(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(n);
+    }
+    if(!strcmp(name,"cheez")||!strcmp(name,"toStr")){
         char buf[MAX_STR];
-        if (argc>0) {
-            if (args[0].type==VAL_STRING) { strncpy(buf,args[0].str?args[0].str:"",MAX_STR-1); }
-            else if (args[0].type==VAL_NUMBER) {
-                if (args[0].num==(long long)args[0].num) snprintf(buf,MAX_STR,"%lld",(long long)args[0].num);
-                else snprintf(buf,MAX_STR,"%g",args[0].num);
-            } else if (args[0].type==VAL_BOOL) snprintf(buf,MAX_STR,"%s",args[0].num?"sach":"jhooth");
-            else strcpy(buf,"nil");
-        } else strcpy(buf,"nil");
-        for(int i=0;i<argc;i++) free_value(&args[i]);
+        Val r=argc>0?make_str(val_to_str(&args[0],buf,MAX_STR)):make_str("");
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return r;
+    }
+    if(!strcmp(name,"halat")||!strcmp(name,"toBool")){
+        int b=argc>0?val_truthy(&args[0]):0;
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_bool(b);
+    }
+    /* max / min */
+    if(!strcmp(name,"vadda")||!strcmp(name,"max")){
+        double best=argc>0?val_num(&args[0]):-1e300;
+        for(int i=1;i<argc;i++){ double v=val_num(&args[i]); if(v>best)best=v; }
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(best);
+    }
+    if(!strcmp(name,"chhota")||!strcmp(name,"min")){
+        double best=argc>0?val_num(&args[0]):1e300;
+        for(int i=1;i<argc;i++){ double v=val_num(&args[i]); if(v<best)best=v; }
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_num(best);
+    }
+    /* String built-ins */
+    if(!strcmp(name,"upar")||!strcmp(name,"upper")){
+        char buf[MAX_STR]={0};
+        if(argc>0&&args[0].t==VAL_STR&&args[0].s){
+            strncpy(buf,args[0].s,MAX_STR-1);
+            for(int i=0;buf[i];i++) buf[i]=toupper((unsigned char)buf[i]);
+        }
+        for(int i=0;i<argc;i++) free_val(&args[i]);
         return make_str(buf);
     }
-    if (strcmp(name,"mod")==0) {
-        double a = argc>0 ? val_to_num(&args[0]) : 0;
-        double b = argc>1 ? val_to_num(&args[1]) : 1;
-        for(int i=0;i<argc;i++) free_value(&args[i]);
-        return make_num(fmod(a,b));
-    }
-
-    /* User-defined functions */
-    for (int fi=0; fi<func_count; fi++) {
-        if (strcmp(funcs[fi].name, name)==0) {
-            Function *f = &funcs[fi];
-            push_scope();
-            /* Bind params */
-            for (int i=0; i<f->param_count && i<argc; i++) {
-                set_var(f->params[i], args[i], 0);
-            }
-            for(int i=0;i<argc;i++) free_value(&args[i]);
-            /* Execute body */
-            did_return = 0;
-            return_value = make_nil();
-            execute_block(f->start_line, f->end_line);
-            Value ret = copy_value(&return_value);
-            free_value(&return_value);
-            return_value = make_nil();
-            did_return = 0;
-            pop_scope();
-            return ret;
+    if(!strcmp(name,"thhalle")||!strcmp(name,"lower")){
+        char buf[MAX_STR]={0};
+        if(argc>0&&args[0].t==VAL_STR&&args[0].s){
+            strncpy(buf,args[0].s,MAX_STR-1);
+            for(int i=0;buf[i];i++) buf[i]=tolower((unsigned char)buf[i]);
         }
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_str(buf);
+    }
+    /* likh as function (for shell expression results) */
+    if(!strcmp(name,"likh")){
+        for(int i=0;i<argc;i++){ print_val(&args[i]); if(i<argc-1)printf(" "); }
+        printf("\n");
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        return make_nil();
     }
 
-    fprintf(stderr, "Error: Unknown function '%s'\n", name);
-    for(int i=0;i<argc;i++) free_value(&args[i]);
+    /* User-defined function */
+    for(int fi=0;fi<func_count;fi++){
+        if(strcmp(funcs[fi].name,name)!=0) continue;
+        Func *f=&funcs[fi];
+        push_scope();
+        for(int i=0;i<f->param_count&&i<argc;i++)
+            set_var(f->params[i], args[i], 0);
+        for(int i=0;i<argc;i++) free_val(&args[i]);
+        did_ret=0; free_val(&ret_val); ret_val=make_nil();
+        exec_block(f->body_start, f->body_end);
+        Val rv=copy_val(&ret_val);
+        free_val(&ret_val); ret_val=make_nil();
+        did_ret=0;
+        pop_scope();
+        return rv;
+    }
+
+    fprintf(stderr,"Error: function '%s' nahi mili\n",name);
+    for(int i=0;i<argc;i++) free_val(&args[i]);
     return make_nil();
 }
 
 /* ---- UNARY ---- */
-static Value parse_unary(const char **p) {
-    *p = skip_ws(*p);
-    if (**p=='-') {
+static Val parse_unary(const char **p){
+    *p=skip_ws(*p);
+    if(**p=='-'){
         (*p)++;
-        Value v = parse_unary(p);
-        v.num = -val_to_num(&v); v.type = VAL_NUMBER;
-        return v;
+        Val v=parse_unary(p);
+        double n=-val_num(&v); free_val(&v);
+        return make_num(n);
     }
-    /* "na " = logical NOT */
-    if (strncmp(*p,"na ",3)==0) {
-        *p += 3;
-        Value v = parse_unary(p);
-        int b = !val_truthy(&v);
-        free_value(&v);
+    if(**p=='!'){ /* C-style not */
+        (*p)++;
+        Val v=parse_unary(p);
+        int b=!val_truthy(&v); free_val(&v);
+        return make_bool(b);
+    }
+    /* "na " = logical not */
+    if(strncmp(*p,"na ",3)==0||strncmp(*p,"na\t",3)==0){
+        *p+=2;
+        Val v=parse_unary(p);
+        int b=!val_truthy(&v); free_val(&v);
         return make_bool(b);
     }
     return parse_atom(p);
 }
 
-/* ---- MUL / DIV / MOD / POWER ---- */
-static Value parse_mul(const char **p) {
-    Value left = parse_unary(p);
-    while (1) {
-        *p = skip_ws(*p);
-        char op = **p;
-        if (op!='*' && op!='/' && op!='%' && op!='^') break;
+/* ---- MUL / DIV / MOD / POW ---- */
+static Val parse_mul(const char **p){
+    Val L=parse_unary(p);
+    for(;;){
+        *p=skip_ws(*p);
+        char op=**p;
+        if(op!='*'&&op!='/'&&op!='%'&&op!='^') break;
         (*p)++;
-        Value right = parse_unary(p);
-        double l = val_to_num(&left), r = val_to_num(&right);
-        free_value(&left); free_value(&right);
-        if      (op=='*') left = make_num(l*r);
-        else if (op=='/') left = make_num(r!=0 ? l/r : 0);
-        else if (op=='%') left = make_num(fmod(l,r));
-        else if (op=='^') left = make_num(pow(l,r));
+        Val R=parse_unary(p);
+        double l=val_num(&L), r=val_num(&R);
+        free_val(&L); free_val(&R);
+        if     (op=='*') L=make_num(l*r);
+        else if(op=='/') L=make_num(r?l/r:0);
+        else if(op=='%') L=make_num(r?fmod(l,r):0);
+        else             L=make_num(pow(l,r));
     }
-    return left;
+    return L;
 }
 
-/* ---- ADD / SUB (also string concat) ---- */
-static Value parse_add(const char **p) {
-    Value left = parse_mul(p);
-    while (1) {
-        *p = skip_ws(*p);
-        char op = **p;
-        if (op!='+' && op!='-') break;
+/* ---- ADD / SUB  (also string concat with +) ---- */
+static Val parse_add(const char **p){
+    Val L=parse_mul(p);
+    for(;;){
+        *p=skip_ws(*p);
+        char op=**p;
+        if(op!='+'&&op!='-') break;
         (*p)++;
-        Value right = parse_mul(p);
-
-        if (op=='+' && (left.type==VAL_STRING || right.type==VAL_STRING)) {
-            /* String concatenation */
-            char buf[MAX_STR*2];
-            char ls[MAX_STR], rs[MAX_STR];
-            if (left.type==VAL_STRING)  strncpy(ls, left.str?left.str:"",  MAX_STR-1);
-            else if (left.type==VAL_NUMBER) {
-                if (left.num==(long long)left.num) snprintf(ls,MAX_STR,"%lld",(long long)left.num);
-                else snprintf(ls,MAX_STR,"%g",left.num);
-            } else strcpy(ls,"");
-            if (right.type==VAL_STRING) strncpy(rs, right.str?right.str:"", MAX_STR-1);
-            else if (right.type==VAL_NUMBER) {
-                if (right.num==(long long)right.num) snprintf(rs,MAX_STR,"%lld",(long long)right.num);
-                else snprintf(rs,MAX_STR,"%g",right.num);
-            } else strcpy(rs,"");
-            snprintf(buf, sizeof(buf), "%s%s", ls, rs);
-            free_value(&left); free_value(&right);
-            left = make_str(buf);
+        Val R=parse_mul(p);
+        if(op=='+'&&(L.t==VAL_STR||R.t==VAL_STR)){
+            char lb[MAX_STR],rb[MAX_STR];
+            val_to_str(&L,lb,MAX_STR); val_to_str(&R,rb,MAX_STR);
+            char *nb=malloc(strlen(lb)+strlen(rb)+1);
+            strcpy(nb,lb); strcat(nb,rb);
+            free_val(&L); free_val(&R);
+            L=make_str(nb); free(nb);
         } else {
-            double l = val_to_num(&left), r = val_to_num(&right);
-            free_value(&left); free_value(&right);
-            left = make_num(op=='+' ? l+r : l-r);
+            double l=val_num(&L),r=val_num(&R);
+            free_val(&L); free_val(&R);
+            L=make_num(op=='+'?l+r:l-r);
         }
     }
-    return left;
+    return L;
 }
 
 /* ---- COMPARE ---- */
-static Value parse_compare(const char **p) {
-    Value left = parse_add(p);
-    while (1) {
-        *p = skip_ws(*p);
-        char op1 = **p, op2 = *(*p+1);
-        int handled = 0;
-        if      (op1=='=' && op2=='=') { (*p)+=2; handled=1; }
-        else if (op1=='!' && op2=='=') { (*p)+=2; handled=1; }
-        else if (op1=='<' && op2=='=') { (*p)+=2; handled=1; }
-        else if (op1=='>' && op2=='=') { (*p)+=2; handled=1; }
-        else if (op1=='<')             { (*p)+=1; handled=1; op2=' '; }
-        else if (op1=='>')             { (*p)+=1; handled=1; op2=' '; }
-        if (!handled) break;
+static Val parse_cmp(const char **p){
+    Val L=parse_add(p);
+    for(;;){
+        *p=skip_ws(*p);
+        char o1=**p, o2=*(*p+1);
+        int two=0;
+        if((o1=='='&&o2=='=')||(o1=='!'&&o2=='=')||
+           (o1=='<'&&o2=='=')||(o1=='>'&&o2=='=')) two=1;
+        else if(o1=='<'||o1=='>') two=0;
+        else break;
 
-        Value right = parse_add(p);
-        int result = 0;
-        /* String comparison */
-        if (left.type==VAL_STRING && right.type==VAL_STRING) {
-            int cmp = strcmp(left.str?left.str:"", right.str?right.str:"");
-            if      (op1=='=' && op2=='=') result = cmp==0;
-            else if (op1=='!' && op2=='=') result = cmp!=0;
-            else if (op1=='<' && op2=='=') result = cmp<=0;
-            else if (op1=='>' && op2=='=') result = cmp>=0;
-            else if (op1=='<')             result = cmp<0;
-            else if (op1=='>')             result = cmp>0;
+        if(two) (*p)+=2; else (*p)+=1;
+        Val R=parse_add(p);
+        int res=0;
+        if(L.t==VAL_STR&&R.t==VAL_STR){
+            int c=strcmp(L.s?L.s:"",R.s?R.s:"");
+            if(o1=='='&&o2=='=') res=c==0;
+            else if(o1=='!'&&o2=='=') res=c!=0;
+            else if(o1=='<'&&o2=='=') res=c<=0;
+            else if(o1=='>'&&o2=='=') res=c>=0;
+            else if(o1=='<') res=c<0;
+            else res=c>0;
         } else {
-            double l = val_to_num(&left), r = val_to_num(&right);
-            if      (op1=='=' && op2=='=') result = l==r;
-            else if (op1=='!' && op2=='=') result = l!=r;
-            else if (op1=='<' && op2=='=') result = l<=r;
-            else if (op1=='>' && op2=='=') result = l>=r;
-            else if (op1=='<')             result = l<r;
-            else if (op1=='>')             result = l>r;
+            double l=val_num(&L),r=val_num(&R);
+            if(o1=='='&&o2=='=') res=l==r;
+            else if(o1=='!'&&o2=='=') res=l!=r;
+            else if(o1=='<'&&o2=='=') res=l<=r;
+            else if(o1=='>'&&o2=='=') res=l>=r;
+            else if(o1=='<') res=l<r;
+            else res=l>r;
         }
-        free_value(&left); free_value(&right);
-        left = make_bool(result);
+        free_val(&L); free_val(&R);
+        L=make_bool(res);
     }
-    return left;
+    return L;
 }
 
-/* ---- AND (te) ---- */
-static Value parse_and(const char **p) {
-    Value left = parse_compare(p);
-    while (1) {
-        *p = skip_ws(*p);
-        if (strncmp(*p,"te ",3)!=0 && strncmp(*p,"te\0",3)!=0) break;
-        *p += 2;
-        Value right = parse_compare(p);
-        int b = val_truthy(&left) && val_truthy(&right);
-        free_value(&left); free_value(&right);
-        left = make_bool(b);
+/* ---- AND  (te) ---- */
+static Val parse_and(const char **p){
+    Val L=parse_cmp(p);
+    for(;;){
+        const char *save=*p;
+        *p=skip_ws(*p);
+        if(strncmp(*p,"te ",3)==0||strncmp(*p,"te\t",3)==0||
+           (strncmp(*p,"te",2)==0&&!isalnum((unsigned char)(*p)[2])&&(*p)[2]!='_')){
+            *p+=2;
+            Val R=parse_cmp(p);
+            int b=val_truthy(&L)&&val_truthy(&R);
+            free_val(&L); free_val(&R);
+            L=make_bool(b);
+        } else { *p=save; break; }
     }
-    return left;
+    return L;
 }
 
-/* ---- OR (ya) ---- */
-static Value parse_or(const char **p) {
-    Value left = parse_and(p);
-    while (1) {
-        *p = skip_ws(*p);
-        if (strncmp(*p,"ya ",3)!=0 && strncmp(*p,"ya\0",3)!=0) break;
-        *p += 2;
-        Value right = parse_and(p);
-        int b = val_truthy(&left) || val_truthy(&right);
-        free_value(&left); free_value(&right);
-        left = make_bool(b);
+/* ---- OR  (ya) ---- */
+static Val parse_or(const char **p){
+    Val L=parse_and(p);
+    for(;;){
+        const char *save=*p;
+        *p=skip_ws(*p);
+        if(strncmp(*p,"ya ",3)==0||strncmp(*p,"ya\t",3)==0||
+           (strncmp(*p,"ya",2)==0&&!isalnum((unsigned char)(*p)[2])&&(*p)[2]!='_')){
+            *p+=2;
+            Val R=parse_and(p);
+            int b=val_truthy(&L)||val_truthy(&R);
+            free_val(&L); free_val(&R);
+            L=make_bool(b);
+        } else { *p=save; break; }
     }
-    return left;
+    return L;
 }
 
-/* ---- TOP-LEVEL EXPR ---- */
-static Value parse_expr(const char **p) {
-    return parse_or(p);
-}
+static Val parse_expr(const char **p){ return parse_or(p); }
 
-/* Public evaluate entry point */
-static Value evaluate(char *expr) {
-    const char *p = expr;
+static Val eval(const char *expr){
+    const char *p=expr;
     return parse_expr(&p);
 }
 
 /* ============================================================
-   REGISTER FUNCTIONS (first pass)
+   EXEC BLOCK / STMT
    ============================================================ */
-static void register_functions(void) {
-    for (int i=0; i<line_count; i++) {
-        char buf[MAX_STR]; strncpy(buf,lines[i],MAX_STR-1); buf[MAX_STR-1]='\0';
-        char *l = trim(buf);
-        if (strncmp(l,"seva ",5)!=0) continue;
-        if (func_count >= MAX_FUNCTIONS) break;
-        char *rest = l+5;
-        /* Parse name */
-        char *paren = strchr(rest,'(');
-        if (!paren) continue;
-        char fname[MAX_STR];
-        int fn=0;
-        while (rest<paren && !isspace((unsigned char)*rest)) fname[fn++]=*rest++;
-        fname[fn]='\0';
-        strncpy(funcs[func_count].name, fname, MAX_STR-1);
-        /* Parse params */
-        funcs[func_count].param_count = 0;
-        paren++;
-        while (*paren && *paren!=')') {
-            while (*paren==' '||*paren==',') paren++;
-            if (*paren==')') break;
-            int k=0; char pname[MAX_STR];
-            while (*paren && *paren!=',' && *paren!=')' && !isspace((unsigned char)*paren))
-                pname[k++]=*paren++;
-            pname[k]='\0';
-            if (k>0 && funcs[func_count].param_count<MAX_PARAMS)
-                strncpy(funcs[func_count].params[funcs[func_count].param_count++], pname, MAX_STR-1);
-        }
-        funcs[func_count].start_line = i+1;
-        funcs[func_count].end_line   = find_matching_samapt(i);
-        func_count++;
+static void exec_block(int start, int end){
+    for(int i=start;i<end&&!did_ret&&!did_break&&!did_cont;i++){
+        char *l=trimdup(src[i]);
+        int skip=( strcmp(l,"samapt")==0
+                 ||(strncmp(l,"nhite",5)==0&&(l[5]=='\0'||l[5]==' ')) );
+        free(l);
+        if(skip) continue;
+
+        exec_stmt(i);
+
+        /* jump i past body of compound statements so we don't double-execute */
+        char *l2=trimdup(src[i]);
+        int is_compound = (  (strncmp(l2,"je ",3)==0||strcmp(l2,"je")==0)
+                           || strncmp(l2,"dohrao ",7)==0
+                           || strncmp(l2,"jad tak ",8)==0
+                           || strncmp(l2,"seva ",5)==0
+                           || strcmp(l2,"hukam")==0 );
+        if(is_compound){ int sm=find_samapt(i); i=sm; }
+        free(l2);
     }
 }
 
-/* ============================================================
-   EXECUTE BLOCK
-   ============================================================ */
-static void execute_block(int start, int end) {
-    for (int i=start; i<end && !did_return && !did_break && !did_continue; i++) {
-        char buf[MAX_STR]; strncpy(buf,lines[i],MAX_STR-1); buf[MAX_STR-1]='\0';
-        char *l = trim(buf);
-        if (!l || strlen(l)==0) continue;
-        if (strcmp(l,"samapt")==0) break;
-        /* Skip nhite at block level - handled by je */
-        if (strncmp(l,"nhite",5)==0 && (l[5]=='\0'||l[5]==' '||l[5]=='\n')) { /* skip */ continue; }
-        execute_statement(i);
-    }
-}
+static void exec_stmt(int ln){
+    char *raw=trimdup(src[ln]);
+    char *line=raw;
+    if(!line||!*line){ free(raw); return; }
 
-/* ============================================================
-   EXECUTE STATEMENT
-   ============================================================ */
-static void execute_statement(int line_num) {
-    char buf[MAX_STR*4]; strncpy(buf, lines[line_num], MAX_STR*4-1); buf[MAX_STR*4-1]='\0';
-    char *line = trim(buf);
-    if (!line || strlen(line)==0) return;
+    /* ---- ignore ---- */
+    if(line[0]=='#'||strcmp(line,"hukam")==0||strcmp(line,"samapt")==0
+       ||(strncmp(line,"nhite",5)==0&&(line[5]=='\0'||line[5]==' '))){ free(raw); return; }
 
-    /* ---- Comments (waak) ---- */
-    if (strncmp(line,"waak",4)==0) return;
+    /* ---- comment  waak ---- */
+    if(strncmp(line,"waak",4)==0&&(line[4]==' '||line[4]=='['||line[4]=='\0')){ free(raw); return; }
 
-    /* ---- Program header/structure ---- */
-    if (line[0]=='#') return;
-    if (strcmp(line,"hukam")==0) return;
-    if (strcmp(line,"samapt")==0) return;
-    if (strncmp(line,"nhite",5)==0) return;
+    /* ---- function definition: skip body ---- */
+    if(strncmp(line,"seva ",5)==0){ free(raw); return; }
 
-    /* ---- Function definition (skip body) ---- */
-    if (strncmp(line,"seva ",5)==0) {
-        /* Skip to matching samapt - body already registered */
-        return;
+    /* ---- wapas (return) ---- */
+    if(strncmp(line,"wapas",5)==0&&(line[5]==' '||line[5]=='\0')){
+        char *expr=my_trim(line+5);
+        free_val(&ret_val);
+        ret_val = *expr ? eval(expr) : make_nil();
+        did_ret=1; free(raw); return;
     }
 
-    /* ---- RETURN (wapas) ---- */
-    if (strncmp(line,"wapas",5)==0) {
-        char *expr = line+5;
-        expr = trim(expr);
-        if (strlen(expr)>0) {
-            free_value(&return_value);
-            return_value = evaluate(expr);
-        } else {
-            return_value = make_nil();
-        }
-        did_return = 1;
-        return;
-    }
+    /* ---- rok (break) ---- */
+    if(strcmp(line,"rok")==0){ did_break=1; free(raw); return; }
 
-    /* ---- BREAK (rok) ---- */
-    if (strcmp(line,"rok")==0) { did_break=1; return; }
+    /* ---- agle (continue) ---- */
+    if(strcmp(line,"agle")==0){ did_cont=1; free(raw); return; }
 
-    /* ---- CONTINUE (agle) ---- */
-    if (strcmp(line,"agle")==0) { did_continue=1; return; }
-
-    /* ---- PRINT (likh) ---- */
-    if (strncmp(line,"likh",4)==0 && (line[4]==' '||line[4]=='\0')) {
-        char *expr = trim(line+4);
-        if (strlen(expr)==0) { printf("\n"); return; }
-        Value v = evaluate(expr);
-        print_value(&v);
-        printf("\n");
-        free_value(&v);
-        return;
-    }
-
-    /* ---- INPUT (suno) ---- */
-    if (strncmp(line,"suno",4)==0 && (line[4]==' '||line[4]=='\0')) {
-        char *var = trim(line+4);
-        char input[MAX_STR];
-        fflush(stdout);
-        if (!fgets(input, MAX_STR, stdin)) return;
-        input[strcspn(input,"\n")] = 0;
-        /* Try to parse as number */
-        char *end;
-        double num = strtod(input, &end);
-        Value v;
-        /* If entire string was consumed as number */
-        if (*end=='\0' && end!=input) v = make_num(num);
-        else v = make_str(input);
-        set_var(var, v, 0);
-        free_value(&v);
-        return;
-    }
-
-    /* ---- VARIABLE DECLARATION (ank, cheez, halat, sangat) ---- */
-    if ((strncmp(line,"ank ",4)==0) ||
-        (strncmp(line,"cheez ",6)==0) ||
-        (strncmp(line,"halat ",6)==0) ||
-        (strncmp(line,"sangat ",7)==0)) {
-        int is_const = 0;
-        /* skip type keyword */
-        char *rest = strchr(line,' ');
-        rest = trim(rest);
-        char *eq = strchr(rest,'=');
-        if (eq) {
-            *eq = '\0';
-            char *name = trim(rest);
-            char *expr = trim(eq+1);
-            Value v = evaluate(expr);
-            set_var(name, v, is_const);
-            free_value(&v);
-        } else {
-            /* Declaration without init */
-            char *name = trim(rest);
-            set_var(name, make_nil(), 0);
-        }
-        return;
-    }
-
-    /* ---- CONSTANT (pakka) ---- */
-    if (strncmp(line,"pakka ",6)==0) {
-        char *rest = trim(line+6);
-        /* skip optional type keyword */
-        if (strncmp(rest,"ank ",4)==0||strncmp(rest,"cheez ",6)==0||
-            strncmp(rest,"halat ",6)==0||strncmp(rest,"sangat ",7)==0) {
-            rest = strchr(rest,' ');
-            rest = trim(rest);
-        }
-        char *eq = strchr(rest,'=');
-        if (eq) {
-            *eq='\0';
-            char *name = trim(rest);
-            char *expr = trim(eq+1);
-            Value v = evaluate(expr);
-            set_var(name, v, 1);
-            free_value(&v);
-        }
-        return;
-    }
-
-    /* ---- IF (je) ---- */
-    if (strncmp(line,"je ",3)==0) {
-        char *expr = trim(line+3);
-        /* Remove trailing 'ta' or ':' if present */
-        int el = strlen(expr);
-        if (el>=2 && strcmp(expr+el-2," ta")==0) { expr[el-3]='\0'; }
-        if (expr[el-1]==':') expr[el-1]='\0';
-
-        int samapt_line = find_matching_samapt(line_num);
-        int nhite_line  = find_nhite(line_num, samapt_line);
-
-        Value cond = evaluate(expr);
-        int   truth = val_truthy(&cond);
-        free_value(&cond);
-
-        push_scope();
-        if (truth) {
-            int end = nhite_line!=-1 ? nhite_line : samapt_line;
-            execute_block(line_num+1, end);
-        } else if (nhite_line!=-1) {
-            execute_block(nhite_line+1, samapt_line);
-        }
-        pop_scope();
-        /* skip to after samapt - but we handle this in execute_block loop */
-        /* We need to advance the outer loop; hack: skip lines via a jump.
-           Since we can't return a jump, the outer execute_block just continues;
-           the inner blocks already executed. Lines between je...samapt that
-           aren't in our executed sub-block are just execute_statement'd harmlessly
-           because they're nhite/samapt and we skip those. */
-        return;
-    }
-
-    /* ---- FOR LOOP (dohrao VAR ton START to END) ---- */
-    if (strncmp(line,"dohrao ",7)==0) {
-        char *rest = trim(line+7);
-        char temp[MAX_STR]; strncpy(temp,rest,MAX_STR-1);
-        char var_name[MAX_STR]="";
-        double loop_start=0, loop_end=0, step=1;
-
-        char *tok = strtok(temp," ");
-        if (!tok) return;
-        strncpy(var_name,tok,MAX_STR-1);
-
-        tok = strtok(NULL," ");
-        if (!tok || strcmp(tok,"ton")!=0) { fprintf(stderr,"dohrao syntax error\n"); return; }
-
-        tok = strtok(NULL," ");
-        if (!tok) return;
-        loop_start = atof(tok);
-
-        tok = strtok(NULL," ");
-        if (!tok || strcmp(tok,"to")!=0) { fprintf(stderr,"dohrao syntax error\n"); return; }
-
-        tok = strtok(NULL," ");
-        if (!tok) return;
-        loop_end = atof(tok);
-
-        /* Optional step */
-        tok = strtok(NULL," ");
-        if (tok && strcmp(tok,"kadam")==0) {
-            tok = strtok(NULL," ");
-            if (tok) step = atof(tok);
-        }
-
-        int samapt_line = find_matching_samapt(line_num);
-
-        for (double iv=loop_start;
-             (step>0 ? iv<=loop_end : iv>=loop_end) && !did_return;
-             iv+=step) {
-            push_scope();
-            set_var(var_name, make_num(iv), 0);
-            did_break=0; did_continue=0;
-            execute_block(line_num+1, samapt_line);
-            pop_scope();
-            if (did_break) { did_break=0; break; }
-            if (did_continue) { did_continue=0; continue; }
-        }
-        return;
-    }
-
-    /* ---- WHILE LOOP (jad tak COND) ---- */
-    if (strncmp(line,"jad tak ",8)==0) {
-        char *expr = trim(line+8);
-        int samapt_line = find_matching_samapt(line_num);
-
-        while (!did_return) {
-            /* Re-read expr each iteration since it may reference vars */
-            char expr_copy[MAX_STR]; strncpy(expr_copy,expr,MAX_STR-1);
-            Value cond = evaluate(expr_copy);
-            int truth = val_truthy(&cond);
-            free_value(&cond);
-            if (!truth) break;
-
-            push_scope();
-            did_break=0; did_continue=0;
-            execute_block(line_num+1, samapt_line);
-            pop_scope();
-            if (did_break) { did_break=0; break; }
-            if (did_continue) { did_continue=0; continue; }
-        }
-        return;
-    }
-
-    /* ---- ARRAY ELEMENT ASSIGNMENT: name[idx] = expr ---- */
-    if (isalpha((unsigned char)line[0])) {
-        char *bracket = strchr(line,'[');
-        char *eq      = strchr(line,'=');
-        if (bracket && eq && bracket < eq && *(eq-1)!='!' && *(eq-1)!='<' && *(eq-1)!='>' && *(eq+1)!='=') {
-            /* Array index assignment */
-            char name[MAX_STR]; int nlen=bracket-line;
-            strncpy(name,line,nlen); name[nlen]='\0'; trim(name);
-            *bracket='\0'; bracket++;
-            char *close_b = strchr(bracket,']');
-            if (!close_b) goto plain_assign;
-            *close_b='\0';
-            char *idx_expr = bracket;
-            *eq='\0';
-            char *val_expr = trim(eq+1);
-            Value idx = evaluate(idx_expr);
-            Value val = evaluate(val_expr);
-            int i = (int)val_to_num(&idx);
-            free_value(&idx);
-            Var *v = find_var(name);
-            if (v && v->val.type==VAL_ARRAY && i>=0 && i<v->val.arr_len) {
-                free_value(&v->val.arr[i]);
-                v->val.arr[i] = copy_value(&val);
+    /* ---- likh (print) — supports multiple comma-separated args ---- */
+    if(strncmp(line,"likh",4)==0&&(line[4]==' '||line[4]=='\0')){
+        char *rest=my_trim(line+4);
+        if(!*rest){ printf("\n"); free(raw); return; }
+        /* split by commas that aren't inside strings/brackets */
+        int depth=0; int in_str=0; char sq=0;
+        char arg[MAX_STR]; int aj=0;
+        int first=1;
+        for(int i=0;;i++){
+            char c=rest[i];
+            if(!in_str&&(c=='"'||c=='\'')){ in_str=1; sq=c; }
+            else if(in_str&&c==sq&&(i==0||rest[i-1]!='\\')) in_str=0;
+            if(!in_str){
+                if(c=='['||c=='(') depth++;
+                else if(c==']'||c==')') depth--;
             }
-            free_value(&val);
-            return;
-        }
-    }
-
-plain_assign:
-    /* ---- COMPOUND ASSIGNMENT & PLAIN ASSIGNMENT ---- */
-    if (isalpha((unsigned char)line[0])) {
-        /* Check for +=, -=, *=, /= */
-        char *plus_eq  = strstr(line,"+=");
-        char *minus_eq = strstr(line,"-=");
-        char *mul_eq   = strstr(line,"*=");
-        char *div_eq   = strstr(line,"/=");
-        char *eq       = NULL;
-        char op_char   = 0;
-
-        if      (plus_eq  && (!eq || plus_eq  < eq)) { eq=plus_eq;  op_char='+'; }
-        if      (minus_eq && (!eq || minus_eq < eq)) { eq=minus_eq; op_char='-'; }
-        if      (mul_eq   && (!eq || mul_eq   < eq)) { eq=mul_eq;   op_char='*'; }
-        if      (div_eq   && (!eq || div_eq   < eq)) { eq=div_eq;   op_char='/'; }
-
-        if (!eq) {
-            /* plain = */
-            eq = strchr(line,'=');
-            if (eq && eq>line && (*(eq-1)=='!'||*(eq-1)=='<'||*(eq-1)=='>'||*(eq+1)=='=')) eq=NULL;
-        } else {
-            /* it's a compound eq; skip the operator char before = */
-        }
-
-        if (eq) {
-            if (op_char) {
-                *eq = '\0'; eq+=2; /* skip op and '=' */
+            if((!in_str&&depth==0&&c==',')||c=='\0'){
+                arg[aj]='\0';
+                char *a=my_trim(arg);
+                Val v=eval(a);
+                if(!first) printf(" ");
+                print_val(&v);
+                free_val(&v);
+                first=0;
+                aj=0;
+                if(c=='\0') break;
             } else {
-                *eq = '\0'; eq+=1;
+                if(aj<MAX_STR-1) arg[aj++]=c;
             }
-            char *name = trim(line);
-            char *expr = trim(eq);
-            Value val = evaluate(expr);
-            if (op_char) {
-                Var *v = find_var(name);
-                Value cur = v ? copy_value(&v->val) : make_num(0);
-                double l=val_to_num(&cur), r=val_to_num(&val);
-                free_value(&cur); free_value(&val);
-                switch(op_char){
-                    case '+': val=make_num(l+r); break;
-                    case '-': val=make_num(l-r); break;
-                    case '*': val=make_num(l*r); break;
-                    case '/': val=make_num(r!=0?l/r:0); break;
+        }
+        printf("\n");
+        free(raw); return;
+    }
+
+    /* ---- suno (input) ---- */
+    if(strncmp(line,"suno",4)==0&&(line[4]==' '||line[4]=='\0')){
+        char *prompt_and_var=my_trim(line+4);
+        /* optional: suno "prompt" varname  OR  suno varname */
+        char vname[MAX_STR]={0};
+        char prompt[MAX_STR]={0};
+        if(*prompt_and_var=='"'||*prompt_and_var=='\''){
+            char delim=*prompt_and_var; char *s=prompt_and_var+1;
+            int j=0;
+            while(*s&&*s!=delim){ if(j<MAX_STR-1) prompt[j++]=*s++; else s++; }
+            if(*s) s++;
+            s=my_trim(s);
+            strncpy(vname,s,MAX_STR-1);
+        } else {
+            strncpy(vname,prompt_and_var,MAX_STR-1);
+        }
+        if(*prompt) printf("%s",prompt);
+        fflush(stdout);
+        char inp[MAX_STR]={0};
+        if(fgets(inp,MAX_STR,stdin)){
+            inp[strcspn(inp,"\n")]=0;
+            inp[strcspn(inp,"\r")]=0;
+        }
+        char *endp; double num=strtod(inp,&endp);
+        Val v=(*endp=='\0'&&endp!=inp)?make_num(num):make_str(inp);
+        set_var(vname,v,0);
+        free(raw); return;
+    }
+
+    /* ---- variable declaration: ank / cheez / halat / sangat ---- */
+    int is_typed = ( strncmp(line,"ank ",4)==0||strncmp(line,"cheez ",6)==0
+                   ||strncmp(line,"halat ",6)==0||strncmp(line,"sangat ",7)==0 );
+    int is_const = strncmp(line,"pakka ",6)==0;
+
+    if(is_typed||is_const){
+        char *rest=line;
+        if(is_const){
+            rest=my_trim(line+6);
+            /* optional type word after pakka */
+            if(strncmp(rest,"ank ",4)==0||strncmp(rest,"cheez ",6)==0||
+               strncmp(rest,"halat ",6)==0||strncmp(rest,"sangat ",7)==0)
+                rest=my_trim(strchr(rest,' '));
+        } else {
+            rest=my_trim(strchr(line,' '));
+        }
+        char *eq=strchr(rest,'=');
+        if(eq&&(eq==rest||(*(eq-1)!='!'&&*(eq-1)!='<'&&*(eq-1)!='>'))&&*(eq+1)!='='){
+            *eq='\0';
+            char *vname=my_trim(rest);
+            char *expr =my_trim(eq+1);
+            Val v=eval(expr);
+            set_var(vname,v,is_const);
+        } else {
+            char *vname=my_trim(rest);
+            if(*vname) set_var(vname,make_nil(),is_const);
+        }
+        free(raw); return;
+    }
+
+    /* ---- je (if) ---- */
+    if(strncmp(line,"je ",3)==0){
+        char *cond_str=my_trim(line+3);
+        /* strip trailing ':' or ' ta' */
+        int cl=strlen(cond_str);
+        if(cl>0&&cond_str[cl-1]==':') cond_str[cl-1]='\0';
+        cl=strlen(cond_str);
+        if(cl>=3&&strcmp(cond_str+cl-3," ta")==0) cond_str[cl-3]='\0';
+
+        int sm=find_samapt(ln);
+        int nh=find_nhite(ln,sm);
+        Val cv=eval(cond_str);
+        int truth=val_truthy(&cv); free_val(&cv);
+        push_scope();
+        if(truth)  exec_block(ln+1, nh>=0?nh:sm);
+        else if(nh>=0) exec_block(nh+1, sm);
+        pop_scope();
+        free(raw); return;
+    }
+
+    /* ---- dohrao (for) ---- */
+    if(strncmp(line,"dohrao ",7)==0){
+        char *rest=my_trim(line+7);
+        char tmp[MAX_STR]; strncpy(tmp,rest,MAX_STR-1);
+        char vname[MAX_STR]={0};
+        double from=0,to=0,step=1;
+        char *tok=strtok(tmp," \t");
+        if(!tok){ free(raw); return; }
+        strncpy(vname,tok,MAX_STR-1);
+        tok=strtok(NULL," \t");
+        if(!tok||strcmp(tok,"ton")!=0){ fprintf(stderr,"dohrao: 'ton' chahida\n"); free(raw); return; }
+        tok=strtok(NULL," \t");
+        if(!tok){ free(raw); return; }
+        /* evaluate start expression */
+        from=atof(tok);
+        tok=strtok(NULL," \t");
+        if(!tok||strcmp(tok,"to")!=0){ fprintf(stderr,"dohrao: 'to' chahida\n"); free(raw); return; }
+        tok=strtok(NULL," \t");
+        if(!tok){ free(raw); return; }
+        to=atof(tok);
+        /* optional step */
+        tok=strtok(NULL," \t");
+        if(tok&&strcmp(tok,"kadam")==0){
+            tok=strtok(NULL," \t");
+            if(tok) step=atof(tok);
+        }
+        int sm=find_samapt(ln);
+        if(step==0) step=1;
+        int going_up=(step>0);
+        for(double iv=from;going_up?(iv<=to):(iv>=to);iv+=step){
+            if(did_ret) break;
+            push_scope();
+            set_var(vname,make_num(iv),0);
+            did_break=0; did_cont=0;
+            exec_block(ln+1,sm);
+            pop_scope();
+            if(did_break){ did_break=0; break; }
+            if(did_cont)  { did_cont=0; continue; }
+        }
+        free(raw); return;
+    }
+
+    /* ---- jad tak (while) ---- */
+    if(strncmp(line,"jad tak ",8)==0){
+        char *cond_str=my_trim(line+8);
+        int sm=find_samapt(ln);
+        for(;;){
+            if(did_ret) break;
+            Val cv=eval(cond_str);
+            int truth=val_truthy(&cv); free_val(&cv);
+            if(!truth) break;
+            push_scope();
+            did_break=0; did_cont=0;
+            exec_block(ln+1,sm);
+            pop_scope();
+            if(did_break){ did_break=0; break; }
+            if(did_cont)  { did_cont=0; continue; }
+        }
+        free(raw); return;
+    }
+
+    /* ---- array index assignment: name[idx] = expr ---- */
+    if(isalpha((unsigned char)line[0])||line[0]=='_'){
+        char *br=strchr(line,'[');
+        char *eq=strstr(line,"=");
+        /* make sure eq isn't == != <= >= */
+        while(eq&&(*(eq+1)=='='||(eq>line&&(*(eq-1)=='!'||*(eq-1)=='<'||*(eq-1)=='>'))))
+            eq=strstr(eq+1,"=");
+
+        if(br&&eq&&br<eq){
+            char vname[MAX_STR]={0};
+            int nl=br-line; strncpy(vname,line,nl); vname[nl]='\0'; my_trim(vname);
+            char *idx_s=br+1;
+            char *cb=strchr(idx_s,']');
+            if(cb){
+                *cb='\0'; *eq='\0';
+                char *val_s=my_trim(eq+1);
+                Val idx=eval(idx_s);
+                Val val=eval(val_s);
+                int i=(int)val_num(&idx); free_val(&idx);
+                Var *v=find_var(vname);
+                if(v&&v->val.t==VAL_ARR&&i>=0&&i<v->val.len){
+                    free_val(&v->val.arr[i]);
+                    v->val.arr[i]=copy_val(&val);
                 }
+                free_val(&val);
+                free(raw); return;
             }
-            set_var(name, val, 0);
-            free_value(&val);
-            return;
         }
 
-        /* Bare function call as statement */
-        char *paren = strchr(line,'(');
-        if (paren) {
-            const char *p = line;
-            Value v = parse_expr(&p);
-            free_value(&v);
-            return;
+        /* ---- compound assignment: +=  -=  *=  /= ---- */
+        char *peq=NULL; char pop=0;
+        char *pe;
+        if((pe=strstr(line,"+="))){ peq=pe; pop='+'; }
+        else if((pe=strstr(line,"-="))){ peq=pe; pop='-'; }
+        else if((pe=strstr(line,"*="))){ peq=pe; pop='*'; }
+        else if((pe=strstr(line,"/="))){ peq=pe; pop='/'; }
+
+        if(peq){
+            *peq='\0';
+            char *vname=my_trim(line);
+            char *vexpr=my_trim(peq+2);
+            Val cur; Var *v=find_var(vname);
+            cur = v ? copy_val(&v->val) : make_num(0);
+            Val rhs=eval(vexpr);
+            Val res;
+            if(pop=='+') res=make_num(val_num(&cur)+val_num(&rhs));
+            else if(pop=='-') res=make_num(val_num(&cur)-val_num(&rhs));
+            else if(pop=='*') res=make_num(val_num(&cur)*val_num(&rhs));
+            else res=make_num(val_num(&rhs)?val_num(&cur)/val_num(&rhs):0);
+            free_val(&cur); free_val(&rhs);
+            set_var(vname,res,0);
+            free(raw); return;
         }
+
+        /* ---- plain assignment: name = expr ---- */
+        /* find = that isn't == != <= >= */
+        char *aeq=line;
+        for(;;){
+            aeq=strchr(aeq,'=');
+            if(!aeq) break;
+            if(aeq>line&&(*(aeq-1)=='!'||*(aeq-1)=='<'||*(aeq-1)=='>')){aeq++;continue;}
+            if(*(aeq+1)=='='){aeq++;continue;}
+            break;
+        }
+        if(aeq){
+            *aeq='\0';
+            char *vname=my_trim(line);
+            char *vexpr=my_trim(aeq+1);
+            Val val=eval(vexpr);
+            set_var(vname,val,0);
+            free(raw); return;
+        }
+
+        /* bare function call as statement */
+        char *lpar=strchr(line,'(');
+        if(lpar){
+            const char *pp=line;
+            Val v=parse_expr(&pp);
+            free_val(&v);
+            free(raw); return;
+        }
+    }
+
+    free(raw);
+}
+
+/* ============================================================
+   EXECUTE PROGRAM
+   ============================================================ */
+
+static void run_program(){
+    register_functions();
+    /* look for hukam block */
+    int hs=-1, he=-1;
+    for(int i=0;i<src_count;i++){
+        char *l=trimdup(src[i]);
+        if(strcmp(l,"hukam")==0){ hs=i; he=find_samapt(i); free(l); break; }
+        free(l);
+    }
+    free_val(&ret_val); ret_val=make_nil();
+    did_ret=did_break=did_cont=0;
+    if(hs>=0) exec_block(hs+1,he);
+    else      exec_block(0,src_count);
+}
+
+static void add_line(const char *s){
+    if(src_count<MAX_LINES){
+        src[src_count++]=strdup(s);
     }
 }
 
 /* ============================================================
-   EXECUTE WHOLE PROGRAM
+   INTERACTIVE SHELL  (like Python REPL)
    ============================================================ */
-static void execute_program(void) {
-    /* First pass: register functions */
-    register_functions();
-    /* Second pass: execute top-level statements */
-    /* Find hukam block if present */
-    int hukam_start = -1, hukam_end = -1;
-    for (int i=0; i<line_count; i++) {
-        char buf[MAX_STR]; strncpy(buf,lines[i],MAX_STR-1); buf[MAX_STR-1]='\0';
-        char *l = trim(buf);
-        if (strcmp(l,"hukam")==0) { hukam_start=i; hukam_end=find_matching_samapt(i); break; }
-    }
-    if (hukam_start!=-1) {
-        execute_block(hukam_start+1, hukam_end);
-    } else {
-        /* No hukam block — run entire file as top-level */
-        execute_block(0, line_count);
+static void shell(){
+    printf("╔══════════════════════════════════════════════╗\n");
+    printf("║   13# (13 Sharp) - Punjabi Language v3.0   ║\n");
+    printf("║   Interactive Shell  |  'madad' for help    ║\n");
+    printf("║   'band' ya Ctrl+C to exit                  ║\n");
+    printf("╚══════════════════════════════════════════════╝\n\n");
+
+    /* persistent session: vars survive across entries */
+    char line[MAX_STR*4];
+    static char block_buf[512][MAX_STR]; /* buffer for multi-line blocks */
+    int  block_lines=0;
+    int  in_block=0;   /* depth of open block (je/dohrao/jad tak/seva/hukam) */
+
+    for(;;){
+        /* prompt: >>> at top level, ... inside a block */
+        if(in_block>0) printf("... ");
+        else           printf(">>> ");
+        fflush(stdout);
+
+        if(!fgets(line,sizeof(line),stdin)){
+            printf("\nBand ho raha hai...\n");
+            break;
+        }
+        line[strcspn(line,"\n")]=0;
+        line[strcspn(line,"\r")]=0;
+
+        char *l=my_trim(line);
+
+        /* exit commands */
+        if(strcmp(l,"band")==0||strcmp(l,"exit")==0||strcmp(l,"quit")==0){
+            printf("Sat Sri Akal! 🙏\n"); break;
+        }
+
+        /* help */
+        if(strcmp(l,"madad")==0||strcmp(l,"help")==0){
+            printf("\n  Variables:   ank x = 5   |   cheez s = \"hello\"   |   halat b = sach   |   sangat a = [1,2,3]\n");
+            printf("  Constants:   pakka ank PI = 3.14\n");
+            printf("  Print:       likh x, y, \"text\"          (multiple values OK)\n");
+            printf("  Input:       suno \"Enter name: \" naam\n");
+            printf("  If:          je x > 5 ... nhite ... samapt\n");
+            printf("  For:         dohrao i ton 1 to 10 ... samapt\n");
+            printf("  While:       jad tak x > 0 ... samapt\n");
+            printf("  Function:    seva jodhna(a, b)  wapas a+b  samapt\n");
+            printf("  Built-ins:   lambayi() gol() ghat() vadh() mutlaq() varg() taaqat()\n");
+            printf("               vadda() chhota() upar() thhalle() cheez() ank()\n");
+            printf("  Logic:       te (and)  ya (or)  na (not)\n");
+            printf("  Boolean:     sach  jhooth\n");
+            printf("  Loop ctrl:   rok (break)   agle (continue)\n");
+            printf("  Commands:    band / exit   madad / help   saaf (clear vars)\n\n");
+            continue;
+        }
+
+        /* clear variables */
+        if(strcmp(l,"saaf")==0||strcmp(l,"clear")==0){
+            for(int i=0;i<var_count;i++) free_val(&vars[i].val);
+            var_count=0; func_count=0;
+            printf("(saare variables saaf ho gaye)\n");
+            continue;
+        }
+
+        if(!*l) continue;
+
+        /* accumulate into block buffer */
+        strncpy(block_buf[block_lines],line,MAX_STR-1);
+        block_lines++;
+
+        /* track block depth */
+        if(  strncmp(l,"je ",3)==0||strcmp(l,"je")==0
+           ||strncmp(l,"dohrao ",7)==0
+           ||strncmp(l,"jad tak ",8)==0
+           ||strncmp(l,"seva ",5)==0
+           ||strcmp(l,"hukam")==0 ) in_block++;
+        if(strcmp(l,"samapt")==0&&in_block>0) in_block--;
+
+        /* execute when we have a complete statement */
+        if(in_block==0){
+            /* Check if this is a function definition */
+            char *first=trimdup(block_buf[0]);
+            int is_func_def=(strncmp(first,"seva ",5)==0);
+            free(first);
+
+            if(is_func_def){
+                /* Append to src (don't clear) so the function persists */
+                for(int i=0;i<block_lines;i++) add_line(block_buf[i]);
+                block_lines=0;
+                /* re-register all known functions including new one */
+                register_functions();
+                printf("(seva nondhi ho gayi)\n");
+            } else {
+                /* Normal statement: run in fresh src window but keep func lines */
+                /* Save current src_count (function definitions live at the top) */
+                int func_end=src_count;
+                for(int i=0;i<block_lines;i++) add_line(block_buf[i]);
+                block_lines=0;
+
+                free_val(&ret_val); ret_val=make_nil();
+                did_ret=did_break=did_cont=0;
+                exec_block(func_end, src_count);
+
+                /* Remove the just-executed lines, keep function defs */
+                for(int i=func_end;i<src_count;i++) free(src[i]);
+                src_count=func_end;
+            }
+        }
     }
 }
 
 /* ============================================================
    MAIN
    ============================================================ */
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("╔═══════════════════════════════════════╗\n");
-        printf("║   13# (13 Sharp) Interpreter          ║\n");
-        printf("║   Punjabi-Programming                 ║\n");
-        printf("╠═══════════════════════════════════════╣\n");
-        printf("║  Usage: 13sharp <filename.13>         ║\n");
-        printf("╠═══════════════════════════════════════╣\n");
-        printf("║  Keywords:                            ║\n");
-        printf("║   ank    = number variable            ║\n");
-        printf("║   cheez  = string variable            ║\n");
-        printf("║   halat  = boolean variable           ║\n");
-        printf("║   sangat = array variable             ║\n");
-        printf("║   likh   = print                      ║\n");
-        printf("║   suno   = input                      ║\n");
-        printf("║   je     = if                         ║\n");
-        printf("║   nhite  = else                       ║\n");
-        printf("║   samapt = end                        ║\n");
-        printf("║   dohrao = for loop                   ║\n");
-        printf("║   jad tak= while loop                 ║\n");
-        printf("║   seva   = function                   ║\n");
-        printf("║   wapas  = return                     ║\n");
-        printf("║   pakka  = constant                   ║\n");
-        printf("║   sach   = true                       ║\n");
-        printf("║   jhooth = false                      ║\n");
-        printf("║   te/ya/na = and/or/not               ║\n");
-        printf("╚═══════════════════════════════════════╝\n");
-        return 1;
+int main(int argc, char *argv[]){
+    ret_val=make_nil();
+
+    if(argc>=2){
+        /* file mode */
+        FILE *f=fopen(argv[1],"r");
+        if(!f){ fprintf(stderr,"File nahi khulli: %s\n",argv[1]); return 1; }
+        char buf[MAX_STR*4];
+        while(fgets(buf,sizeof(buf),f)&&src_count<MAX_LINES){
+            buf[strcspn(buf,"\n")]=0;
+            buf[strcspn(buf,"\r")]=0;
+            src[src_count++]=strdup(buf);
+        }
+        fclose(f);
+        /* strip BOM */
+        if(src_count>0&&(unsigned char)src[0][0]==0xEF&&
+           (unsigned char)src[0][1]==0xBB&&(unsigned char)src[0][2]==0xBF)
+            memmove(src[0],src[0]+3,strlen(src[0])-2);
+        run_program();
+    } else {
+        /* interactive shell */
+        shell();
     }
 
-    FILE *f = fopen(argv[1], "r");
-    if (!f) { fprintf(stderr,"Cannot open file: %s\n", argv[1]); return 1; }
-
-    char buffer[MAX_STR*4];
-    while (fgets(buffer, sizeof(buffer), f) && line_count < MAX_LINES) {
-        buffer[strcspn(buffer,"\n")] = 0;
-        buffer[strcspn(buffer,"\r")] = 0;
-        lines[line_count] = dup_str(buffer);
-        line_count++;
-    }
-    fclose(f);
-
-    /* Strip UTF-8 BOM */
-    if (line_count>0 && (unsigned char)lines[0][0]==0xEF &&
-        (unsigned char)lines[0][1]==0xBB && (unsigned char)lines[0][2]==0xBF) {
-        memmove(lines[0], lines[0]+3, strlen(lines[0])-2);
-    }
-
-    return_value = make_nil();
-    execute_program();
-
-    /* Cleanup */
-    for (int i=0; i<line_count; i++) free(lines[i]);
-    for (int i=0; i<var_count; i++) free_value(&vars[i].val);
-    free_value(&return_value);
-
+    for(int i=0;i<src_count;i++) free(src[i]);
+    for(int i=0;i<var_count;i++) free_val(&vars[i].val);
+    free_val(&ret_val);
     return 0;
 }
